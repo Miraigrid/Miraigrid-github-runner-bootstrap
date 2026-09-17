@@ -1,0 +1,15 @@
+services:
+  runner:
+    image: ghcr.io/actions/actions-runner:latest
+    restart: unless-stopped
+    init: true
+    working_dir: /home/runner
+    group_add:
+      - "${DOCKER_GID}"
+    volumes:
+      - runner-data:/home/runner
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["./run.sh"]
+
+volumes:
+  runner-data:
