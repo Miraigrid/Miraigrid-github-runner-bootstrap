@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 ORG="Miraigrid"
 API_VERSION="2026-03-10"
+RUNNER_IMAGE="ghcr.io/actions/actions-runner:latest"
+RUNNER_DIR="/opt/miraigrid-runner"
 RUNNER_NAME="$(hostname -s)"
 RUNNER_LABELS="miraigrid,docker"
 
@@ -46,7 +48,8 @@ fi
 
 install_host_dependencies() {
   if ! command -v apt-get >/dev/null 2>&1; then
-    echo "Docker is not installed and automatic installation currently supports Debian/Ubuntu hosts only." >&2
+    echo "Automatic dependency installation supports Debian/Ubuntu hosts only." >&2
+    echo "On another Linux distribution, preinstall curl, jq, Docker Engine and Docker Compose v2." >&2
     exit 1
   fi
 
@@ -61,7 +64,13 @@ install_host_dependencies() {
   fi
 }
 
-install_host_dependencies
+# Keep the bootstrap small: Debian/Ubuntu can self-bootstrap; other distributions
+# are supported when the required host tools are already present.
+if ! command -v curl >/dev/null 2>&1 || \
+   ! command -v jq >/dev/null 2>&1 || \
+   ! command -v docker >/dev/null 2>&1; then
+  install_host_dependencies
+fi
 
 if ! docker compose version >/dev/null 2>&1; then
   echo "Docker Compose v2 is required (the 'docker compose' command)." >&2
@@ -84,8 +93,18 @@ chmod 600 .env
 echo "Pulling official GitHub Actions runner image..."
 docker compose pull runner
 
-# If the persistent runner volume is already configured, simply ensure it is running.
-if docker compose run --rm --no-deps runner bash -lc 'test -f .runner' >/dev/null 2>&1; then
+# Docker-based Actions need the runner workspace to exist at the same absolute
+# path on both the host and inside the runner container. Seed the official
+# runner files into that host directory once; runner state then persists there.
+if [[ ! -x "${RUNNER_DIR}/config.sh" ]]; then
+  mkdir -p "$RUNNER_DIR"
+  docker run --rm --user 0 \
+    -v "${RUNNER_DIR}:${RUNNER_DIR}" \
+    "$RUNNER_IMAGE" \
+    bash -lc 'cp -a /home/runner/. /opt/miraigrid-runner/ && chown -R 1001:1001 /opt/miraigrid-runner'
+fi
+
+if [[ -f "${RUNNER_DIR}/.runner" ]]; then
   echo "Runner is already registered. Ensuring it is running..."
   docker compose up -d runner
   docker compose ps runner
