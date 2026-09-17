@@ -3,21 +3,32 @@ set -Eeuo pipefail
 
 ORG="Miraigrid"
 API_VERSION="2026-03-10"
-RUNNER_IMAGE="ghcr.io/actions/actions-runner:latest"
-RUNNER_DIR="/opt/miraigrid-runner"
+RUNNER_IMAGE="${RUNNER_IMAGE:-ghcr.io/actions/actions-runner:latest}"
+RUNNER_ROOT="/opt/miraigrid-runners"
+LEGACY_DIR="/opt/miraigrid-runner"
 RUNNER_NAME="$(hostname -s)"
 RUNNER_LABELS="miraigrid,docker"
 
 usage() {
   cat <<'EOF'
-Usage: sudo ./install.sh [--name NAME] [--labels LABEL1,LABEL2,...]
+Usage:
+  sudo ./install.sh --name NAME [--labels LABEL1,LABEL2,...]
+
+Examples:
+  sudo ./install.sh --name netcup-01
+  sudo ./install.sh --name netcup-02 --labels miraigrid,docker,medium
+
+Each NAME gets its own Docker container, Compose project, runner state and _work directory.
+Existing legacy installs under /opt/miraigrid-runner are left untouched.
 EOF
 }
 
+NAME_WAS_SET=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name)
       RUNNER_NAME="${2:?missing value for --name}"
+      NAME_WAS_SET=1
       shift 2
       ;;
     --labels)
@@ -37,7 +48,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${EUID} -ne 0 ]]; then
-  echo "Please run with sudo: sudo ./install.sh" >&2
+  echo "Please run with sudo: sudo ./install.sh --name NAME" >&2
   exit 1
 fi
 
@@ -45,6 +56,33 @@ if [[ ! -f compose.yml ]]; then
   echo "Run this script from the repository directory." >&2
   exit 1
 fi
+
+if [[ "$NAME_WAS_SET" -ne 1 ]]; then
+  echo "--name is required for new multi-runner installs." >&2
+  echo "This prevents accidentally colliding with an existing runner on the same host." >&2
+  usage >&2
+  exit 1
+fi
+
+if [[ ! "$RUNNER_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Runner name may contain only letters, numbers, dot, underscore and hyphen." >&2
+  exit 1
+fi
+
+slugify() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+  if [[ -z "$value" ]]; then
+    echo "Runner name must contain at least one letter or number." >&2
+    exit 1
+  fi
+  printf '%s' "$value"
+}
+
+RUNNER_SLUG="$(slugify "$RUNNER_NAME")"
+RUNNER_DIR="${RUNNER_ROOT}/${RUNNER_SLUG}"
+COMPOSE_PROJECT="miraigrid-${RUNNER_SLUG}"
+META_FILE="${RUNNER_DIR}/.miraigrid-bootstrap"
 
 install_host_dependencies() {
   if ! command -v apt-get >/dev/null 2>&1; then
@@ -64,8 +102,6 @@ install_host_dependencies() {
   fi
 }
 
-# Keep the bootstrap small: Debian/Ubuntu can self-bootstrap; other distributions
-# are supported when the required host tools are already present.
 if ! command -v curl >/dev/null 2>&1 || \
    ! command -v jq >/dev/null 2>&1 || \
    ! command -v docker >/dev/null 2>&1; then
@@ -86,28 +122,64 @@ if [[ ! -S /var/run/docker.sock ]]; then
   exit 1
 fi
 
+# Protect an existing first-generation runner from being replaced by a new
+# runner with the same GitHub name.
+if [[ -f "${LEGACY_DIR}/.runner" ]]; then
+  LEGACY_NAME="$(jq -r '.agentName // empty' "${LEGACY_DIR}/.runner" 2>/dev/null || true)"
+  if [[ -n "$LEGACY_NAME" && "$LEGACY_NAME" == "$RUNNER_NAME" ]]; then
+    echo "A legacy runner named '${RUNNER_NAME}' already exists at ${LEGACY_DIR}." >&2
+    echo "Choose a different --name for the additional runner." >&2
+    exit 1
+  fi
+fi
+
 DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
-printf 'DOCKER_GID=%s\n' "$DOCKER_GID" > .env
-chmod 600 .env
+export DOCKER_GID RUNNER_DIR RUNNER_IMAGE
+
+compose() {
+  docker compose -p "$COMPOSE_PROJECT" "$@"
+}
+
+if [[ -f "$META_FILE" ]]; then
+  stored_name="$(sed -n 's/^RUNNER_NAME=//p' "$META_FILE" | head -n1 || true)"
+  if [[ -n "$stored_name" && "$stored_name" != "$RUNNER_NAME" ]]; then
+    echo "Runner directory collision: ${RUNNER_DIR} belongs to '${stored_name}'." >&2
+    echo "Choose a different --name." >&2
+    exit 1
+  fi
+fi
+
+echo "Runner name:     ${RUNNER_NAME}"
+echo "Runner dir:      ${RUNNER_DIR}"
+echo "Compose project: ${COMPOSE_PROJECT}"
+if [[ -f "${LEGACY_DIR}/.runner" ]]; then
+  echo "Legacy runner detected at ${LEGACY_DIR}; it will not be modified."
+fi
 
 echo "Pulling official GitHub Actions runner image..."
-docker compose pull runner
+compose pull runner
 
-# Docker-based Actions need the runner workspace to exist at the same absolute
-# path on both the host and inside the runner container. Seed the official
-# runner files into that host directory once; runner state then persists there.
 if [[ ! -x "${RUNNER_DIR}/config.sh" ]]; then
   mkdir -p "$RUNNER_DIR"
   docker run --rm --user 0 \
+    -e RUNNER_DIR="$RUNNER_DIR" \
     -v "${RUNNER_DIR}:${RUNNER_DIR}" \
     "$RUNNER_IMAGE" \
-    bash -lc 'cp -a /home/runner/. /opt/miraigrid-runner/ && chown -R 1001:1001 /opt/miraigrid-runner'
+    bash -lc 'cp -a /home/runner/. "$RUNNER_DIR"/ && chown -R 1001:1001 "$RUNNER_DIR"'
 fi
 
+cat > "$META_FILE" <<EOF
+RUNNER_NAME=${RUNNER_NAME}
+RUNNER_SLUG=${RUNNER_SLUG}
+COMPOSE_PROJECT=${COMPOSE_PROJECT}
+RUNNER_DIR=${RUNNER_DIR}
+EOF
+chmod 644 "$META_FILE"
+
 if [[ -f "${RUNNER_DIR}/.runner" ]]; then
-  echo "Runner is already registered. Ensuring it is running..."
-  docker compose up -d runner
-  docker compose ps runner
+  echo "Runner is already registered. Ensuring only this runner is running..."
+  compose up -d runner
+  compose ps runner
   exit 0
 fi
 
@@ -137,7 +209,7 @@ fi
 unset GITHUB_ADMIN_TOKEN
 
 echo "Registering runner '${RUNNER_NAME}' with labels '${RUNNER_LABELS}'..."
-docker compose run --rm --no-deps \
+compose run --rm --no-deps \
   -e RUNNER_REGISTRATION_TOKEN="$REGISTRATION_TOKEN" \
   -e RUNNER_NAME="$RUNNER_NAME" \
   -e RUNNER_LABELS="$RUNNER_LABELS" \
@@ -154,8 +226,8 @@ docker compose run --rm --no-deps \
 
 unset REGISTRATION_TOKEN
 
-docker compose up -d runner
+compose up -d runner
 
 echo
 echo "Runner is online (or connecting)."
-docker compose ps runner
+compose ps runner
