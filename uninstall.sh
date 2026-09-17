@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 ORG="Miraigrid"
 API_VERSION="2026-03-10"
+RUNNER_DIR="/opt/miraigrid-runner"
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "Please run with sudo: sudo ./uninstall.sh" >&2
@@ -19,11 +20,18 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-# Nothing registered locally: just clean up the local stack and volume.
-if ! docker compose run --rm --no-deps runner bash -lc 'test -f .runner' >/dev/null 2>&1; then
-  docker compose down -v --remove-orphans || true
+if [[ -S /var/run/docker.sock ]]; then
+  DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
+  printf 'DOCKER_GID=%s\n' "$DOCKER_GID" > .env
+  chmod 600 .env
+fi
+
+# Nothing registered locally: just clean up the container and local files.
+if [[ ! -f "${RUNNER_DIR}/.runner" ]]; then
+  docker compose down --remove-orphans 2>/dev/null || true
+  rm -rf "$RUNNER_DIR"
   rm -f .env
-  echo "No registered runner state was found. Local Docker state removed."
+  echo "No registered runner state was found. Local runner state removed."
   exit 0
 fi
 
@@ -60,7 +68,8 @@ docker compose run --rm --no-deps \
 
 unset REMOVE_TOKEN
 
-docker compose down -v --remove-orphans
+docker compose down --remove-orphans
+rm -rf "$RUNNER_DIR"
 rm -f .env
 
-echo "Runner unregistered and local Docker state removed."
+echo "Runner unregistered and local runner state removed."
