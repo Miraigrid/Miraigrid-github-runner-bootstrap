@@ -6,11 +6,11 @@ Lightweight bootstrap for Miraigrid organization-level GitHub Actions self-hoste
 
 - One VPS = one runner.
 - Runner runs inside Docker.
-- Runner state and work directory are stored in a Docker volume.
+- Runner state and workspace persist at `/opt/miraigrid-runner` on the host.
 - The GitHub admin token is only used interactively during install/remove and is **not stored** on the VPS.
 - The runner is registered at organization scope: `Miraigrid`.
 - Default custom labels: `miraigrid,docker`.
-- Docker socket is mounted so Docker-based Actions and `docker build` work.
+- Docker socket is mounted so Docker-based Actions, service containers and `docker build` can work.
 
 ## Requirements
 
@@ -22,7 +22,9 @@ Recommended minimum for useful CI work:
 - About 10 GB free disk space
 - Outbound HTTPS access to GitHub and any package registries used by workflows
 
-GitHub Runner itself does not impose a useful CPU/RAM minimum; the actual requirement depends on the jobs. A 1C/2G VPS is fine for lint and small tests, while builds and integration tests benefit from more CPU/RAM and faster SSD.
+GitHub Runner itself does not impose a practical CPU/RAM minimum; the real requirement comes from the jobs. A 1C/2G VPS is fine for lint and small tests, while builds and integration tests benefit from more CPU/RAM and faster SSD.
+
+The installer can install its host dependencies automatically on Debian/Ubuntu. On another Linux distribution, preinstall `curl`, `jq`, Docker Engine and Docker Compose v2.
 
 ## Install
 
@@ -70,6 +72,18 @@ runs-on: [self-hosted, Linux, miraigrid, medium]
 
 GitHub sends a job to any online, idle runner whose labels match. Each self-hosted runner executes one job at a time; additional jobs remain queued until another matching runner is free.
 
+You do **not** need one runner for every CI job. Ten small jobs can happily share three runners; GitHub queues the rest automatically.
+
+## Suggested sizing
+
+Keep it simple:
+
+- `1C / 2G`: lint, formatting, small unit tests
+- `2C / 4G`: normal frontend tests and builds
+- `4C / 8G+`: heavier builds, Docker and integration tests
+
+Only add `small`, `medium` or `large` labels if you actually need workflows to target different machine classes. Otherwise let everything use the common `miraigrid` pool.
+
 ## Operations
 
 ```bash
@@ -82,7 +96,7 @@ docker compose logs -f runner
 # restart
 docker compose restart runner
 
-# update the official runner container image
+# refresh the official runner container image
 docker compose pull
 docker compose up -d
 
@@ -90,7 +104,7 @@ docker compose up -d
 sudo ./uninstall.sh
 ```
 
-The runner application can self-update. Recreating the container does not lose registration because `/home/runner` is persisted in the `runner-data` Docker volume.
+The runner application can self-update. Recreating the container does not lose registration because runner state is kept on the host at `/opt/miraigrid-runner`.
 
 ## Security
 
@@ -98,6 +112,6 @@ The container mounts `/var/run/docker.sock`. A workflow capable of talking to th
 
 ## Files
 
-- `compose.yml` — one persistent official GitHub Actions runner container.
-- `install.sh` — installs Docker if necessary, gets a short-lived GitHub registration token, registers and starts the runner.
-- `uninstall.sh` — gets a short-lived removal token, unregisters the runner and removes its Docker volume.
+- `compose.yml` — one official GitHub Actions runner container.
+- `install.sh` — installs dependencies if needed, gets a short-lived GitHub registration token, registers and starts the runner.
+- `uninstall.sh` — gets a short-lived removal token, unregisters the runner and removes `/opt/miraigrid-runner`.
