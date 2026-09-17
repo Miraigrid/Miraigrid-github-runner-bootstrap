@@ -64,6 +64,11 @@ if [[ "$NAME_WAS_SET" -ne 1 ]]; then
   exit 1
 fi
 
+if [[ ! "$RUNNER_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Runner name may contain only letters, numbers, dot, underscore and hyphen." >&2
+  exit 1
+fi
+
 slugify() {
   local value
   value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
@@ -115,6 +120,17 @@ fi
 if [[ ! -S /var/run/docker.sock ]]; then
   echo "/var/run/docker.sock was not found." >&2
   exit 1
+fi
+
+# Protect an existing first-generation runner from being replaced by a new
+# runner with the same GitHub name.
+if [[ -f "${LEGACY_DIR}/.runner" ]]; then
+  LEGACY_NAME="$(jq -r '.agentName // empty' "${LEGACY_DIR}/.runner" 2>/dev/null || true)"
+  if [[ -n "$LEGACY_NAME" && "$LEGACY_NAME" == "$RUNNER_NAME" ]]; then
+    echo "A legacy runner named '${RUNNER_NAME}' already exists at ${LEGACY_DIR}." >&2
+    echo "Choose a different --name for the additional runner." >&2
+    exit 1
+  fi
 fi
 
 DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
